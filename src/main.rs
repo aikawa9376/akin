@@ -1,6 +1,7 @@
 use clap::Parser;
 use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use strsim::{jaro_winkler, levenshtein};
 
 #[derive(Parser)]
@@ -24,14 +25,13 @@ const NOISE_TOKENS: &[&str] = &[
     "mod", "bin", "pkg", "internal", "common", "shared",
 ];
 
-/// Split a path into tokens by separators and word boundaries (camelCase, snake_case)
+/// Split a path string into tokens by separators and word boundaries (camelCase, snake_case)
 fn tokenize(path: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     for segment in path.split(['/', '\\', '.', '-']) {
         if segment.is_empty() {
             continue;
         }
-        // Split camelCase and snake_case
         let mut current = String::new();
         let chars: Vec<char> = segment.chars().collect();
         for (i, &ch) in chars.iter().enumerate() {
@@ -57,11 +57,30 @@ fn tokenize(path: &str) -> Vec<String> {
     tokens
 }
 
-/// Normalize a path: remove extension, lowercase, tokenize
+/// Normalize a path: strip all extensions, lowercase, tokenize.
+/// e.g. "src/UserController.spec.ts" → ["src", "user", "controller"]
 fn normalize(path: &Path) -> Vec<String> {
-    let without_ext = path.with_extension("");
-    let s = without_ext.to_string_lossy().to_string();
+    // Build path string with all extensions stripped
+    let mut p = path.to_path_buf();
+    // Strip extensions until none remain (handles .spec.ts, .test.js, etc.)
+    while p.extension().is_some() {
+        p = p.with_extension("");
+    }
+    let s = p.to_string_lossy().to_string();
     tokenize(&s)
+}
+
+/// Extract the primary stem: the first dot-delimited segment of the filename.
+/// e.g. "UserController.spec.ts" → "usercontroller"
+///      "user_service.test.js"   → "user_service"
+fn primary_stem(path: &Path) -> String {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .to_lowercase()
 }
 
 /// Compute token weight (lower for noise tokens)
@@ -92,26 +111,58 @@ fn jaccard_weighted(a: &[String], b: &[String]) -> f64 {
     if union_weight == 0.0 { 0.0 } else { intersection_weight / union_weight }
 }
 
-/// Compute filename-focused similarity (high weight on the file stem)
-fn filename_bonus(target_tokens: &[String], candidate_tokens: &[String]) -> f64 {
-    let t_last = target_tokens.last().map(|s| s.as_str()).unwrap_or("");
-    let c_last = candidate_tokens.last().map(|s| s.as_str()).unwrap_or("");
-    if t_last.is_empty() || c_last.is_empty() {
+/// Score based on the primary stem (first segment before any dot).
+/// This correctly equates "UserService.ts" with "UserService.spec.ts".
+fn stem_similarity(target: &Path, candidate: &Path) -> f64 {
+    let t = primary_stem(target);
+    let c = primary_stem(candidate);
+    if t.is_empty() || c.is_empty() {
         return 0.0;
     }
-    // Use Jaro-Winkler on the stem tokens
-    jaro_winkler(t_last, c_last)
+    let jw = jaro_winkler(&t, &c);
+    // Substring containment boost (e.g. "user" ⊂ "userservice")
+    let boost = if c.contains(t.as_str()) || t.contains(c.as_str()) { 0.15 } else { 0.0 };
+    (jw + boost).min(1.0)
 }
 
-/// Overall similarity score combining multiple algorithms
-fn similarity_score(target: &Path, candidate: &Path) -> f64 {
+/// Fraction of shared directory components (proximity in tree).
+/// e.g. target="src/controllers/user.ts", candidate="src/controllers/user.spec.ts" → 1.0
+///      target="src/controllers/user.ts", candidate="src/views/user.html"           → 0.5
+fn dir_proximity(target: &Path, candidate: &Path) -> f64 {
+    let t_dirs: Vec<_> = target.parent()
+        .map(|p| p.components().map(|c| c.as_os_str().to_owned()).collect())
+        .unwrap_or_default();
+    let c_dirs: Vec<_> = candidate.parent()
+        .map(|p| p.components().map(|c| c.as_os_str().to_owned()).collect())
+        .unwrap_or_default();
+
+    let common = t_dirs.iter().zip(c_dirs.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    let max_depth = t_dirs.len().max(c_dirs.len());
+    if max_depth == 0 { 1.0 } else { common as f64 / max_depth as f64 }
+}
+
+/// Recency score: 1.0 for just-modified, decaying exponentially.
+/// Half-life ≈ 48 hours (score ~0.5 at 2 days, ~0.1 at ~5 days).
+fn recency_score(path: &Path) -> f64 {
+    let Ok(meta) = std::fs::metadata(path) else { return 0.0 };
+    let Ok(modified) = meta.modified() else { return 0.0 };
+    let Ok(elapsed) = SystemTime::now().duration_since(modified) else { return 0.0 };
+    let hours = elapsed.as_secs_f64() / 3600.0;
+    (-hours / 69.3).exp() // ln(2)/48h ≈ 1/69.3 → half-life 48h
+}
+
+/// Overall similarity score combining multiple signals
+fn similarity_score(target: &Path, candidate: &Path, candidate_full: &Path) -> f64 {
     let t_tokens = normalize(target);
     let c_tokens = normalize(candidate);
 
-    // 1. Jaccard on token sets (catches cross-directory same-domain files)
+    // 1. Jaccard on token sets (cross-directory same-domain detection)
     let jaccard = jaccard_weighted(&t_tokens, &c_tokens);
 
-    // 2. Jaro-Winkler on full normalized path string (prefix similarity)
+    // 2. Jaro-Winkler on full normalized path string
     let t_str = t_tokens.join(" ");
     let c_str = c_tokens.join(" ");
     let jw = jaro_winkler(&t_str, &c_str);
@@ -124,22 +175,23 @@ fn similarity_score(target: &Path, candidate: &Path) -> f64 {
         1.0 - levenshtein(&t_str, &c_str) as f64 / max_len as f64
     };
 
-    // 4. Filename bonus (strong signal)
-    let fname_bonus = filename_bonus(&t_tokens, &c_tokens);
+    // 4. Primary stem similarity (fixes compound extensions like .spec.ts)
+    let stem_sim = stem_similarity(target, candidate);
 
-    // Weighted combination
-    let score = jaccard * 0.35 + jw * 0.25 + lev_sim * 0.15 + fname_bonus * 0.25;
+    // 5. Directory proximity bonus
+    let dir_prox = dir_proximity(target, candidate);
 
-    // Extra boost if the last token (file stem) is a substring of the other
-    let t_last = t_tokens.last().map(|s| s.as_str()).unwrap_or("");
-    let c_last = c_tokens.last().map(|s| s.as_str()).unwrap_or("");
-    if !t_last.is_empty() && !c_last.is_empty()
-        && (c_last.contains(t_last) || t_last.contains(c_last))
-    {
-        score + 0.15
-    } else {
-        score
-    }
+    // 6. Recency bonus (additive, max +0.1)
+    let recency = recency_score(candidate_full) * 0.1;
+
+    // Weighted base score
+    let base = jaccard * 0.25
+        + jw * 0.20
+        + lev_sim * 0.10
+        + stem_sim * 0.30
+        + dir_prox * 0.15;
+
+    (base + recency).min(1.0)
 }
 
 fn main() {
@@ -151,10 +203,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Resolve the target to a canonical path
     let target_canonical = target.canonicalize().unwrap_or_else(|_| target.clone());
-
-    // Determine project root (walk from the current directory)
     let project_root = std::env::current_dir().expect("cannot get current directory");
 
     let mut results: Vec<(f64, PathBuf)> = WalkBuilder::new(&project_root)
@@ -167,16 +216,14 @@ fn main() {
             let path = entry.into_path();
             let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
 
-            // Skip the target file itself
             if canonical == target_canonical {
                 return None;
             }
 
-            // Compute relative paths for comparison
             let rel_target = target.strip_prefix(&project_root).unwrap_or(target);
             let rel_candidate = path.strip_prefix(&project_root).unwrap_or(&path);
 
-            let score = similarity_score(rel_target, rel_candidate);
+            let score = similarity_score(rel_target, rel_candidate, &path);
             if score >= cli.threshold {
                 Some((score, path))
             } else {
