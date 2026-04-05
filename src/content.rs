@@ -28,11 +28,21 @@ pub fn content_similarity(a: &Path, b: &Path) -> f64 {
 /// Try to parse a quoted string as an internal URI path.
 /// Returns path tokens if the string is a plausible internal path, None otherwise.
 ///
-/// Filters out:
-/// - External URLs (http, https, //, mailto, tel, javascript, data)
-/// - Anchor-only fragments (#...)
-/// - Strings without `/` (not path-like)
-/// - Strings where all meaningful tokens are too short or too few
+/// Handles three styles of internal path reference:
+///
+/// 1. **Slash paths** (`/application/search`, `../views/user`)
+///    - Standard URL/filesystem paths
+///    - Query string and fragment are stripped
+///
+/// 2. **Backslash paths** (`App\Http\Controllers\HomeController`)
+///    - PHP namespace / Windows-style paths
+///    - Trailing `.php` extension is stripped
+///
+/// 3. **Dot-notation** (`detail.index`, `application.search.index`)
+///    - Laravel-style view names, ZF2 route names, etc.
+///    - Must be ≥2 segments of word-chars, no spaces, not version numbers
+///
+/// Filters out external schemes (http/https/mailto/tel/data/javascript/`//`/#).
 fn parse_uri_tokens(s: &str) -> Option<Vec<String>> {
     let s = s.trim();
     if s.is_empty() { return None; }
@@ -42,24 +52,41 @@ fn parse_uri_tokens(s: &str) -> Option<Vec<String>> {
         if s.starts_with(prefix) { return None; }
     }
 
-    // Must look like a path
-    if !s.contains('/') { return None; }
-
-    // Take path portion only (drop query string and fragment)
-    let path = s.split('?').next().unwrap_or(s);
-    let path = path.split('#').next().unwrap_or(path);
-
-    // Tokenize path segments (strips extensions, splits camelCase, etc.)
-    let tokens: Vec<String> = path
-        .split('/')
-        .filter(|seg| !seg.is_empty())
-        .flat_map(|seg| {
-            // Strip extension from last segment to focus on name
-            let seg = seg.split('.').next().unwrap_or(seg);
-            tokenize(seg)
-        })
-        .filter(|t| !NOISE_TOKENS.contains(&t.as_str()) && t.len() >= 2)
-        .collect();
+    let tokens: Vec<String> = if s.contains('/') {
+        // --- Style 1: slash-separated path ---
+        let path = s.split('?').next().unwrap_or(s);
+        let path = path.split('#').next().unwrap_or(path);
+        path.split('/')
+            .filter(|seg| !seg.is_empty())
+            .flat_map(|seg| {
+                // Strip extension from last segment (e.g. index.phtml → index)
+                let seg = seg.split('.').next().unwrap_or(seg);
+                tokenize(seg)
+            })
+            .filter(|t| !NOISE_TOKENS.contains(&t.as_str()) && t.len() >= 2)
+            .collect()
+    } else if s.contains('\\') {
+        // --- Style 2: backslash-separated (PHP namespace / Windows path) ---
+        // e.g. App\Http\Controllers\HomeController  or  App\Http\Controllers\Home.php
+        let s = s.trim_end_matches(".php").trim_end_matches(".PHP");
+        s.split('\\')
+            .filter(|seg| !seg.is_empty())
+            .flat_map(|seg| tokenize(seg))
+            .filter(|t| !NOISE_TOKENS.contains(&t.as_str()) && t.len() >= 2)
+            .collect()
+    } else if looks_like_dot_notation(s) {
+        // --- Style 3: dot-notation (view/route names) ---
+        // e.g. detail.index  application.search.index  home.create
+        // NOTE: NOISE_TOKENS are *not* filtered here — in dot-notation every
+        // segment is a domain concept (action/module name), not a structural dir.
+        s.split('.')
+            .filter(|seg| !seg.is_empty())
+            .flat_map(|seg| tokenize(seg))
+            .filter(|t| t.len() >= 2)
+            .collect()
+    } else {
+        return None;
+    };
 
     // Require at least 2 meaningful tokens to avoid over-broad matches
     if tokens.len() < 2 { return None; }
@@ -67,11 +94,30 @@ fn parse_uri_tokens(s: &str) -> Option<Vec<String>> {
     Some(tokens)
 }
 
-/// Extract internal URI path token sets from file content.
+/// Return true if `s` looks like a dot-notation path reference (not a filename,
+/// version string, or object property expression).
 ///
-/// Scans for all single- and double-quoted strings, then filters to those
-/// that look like internal paths (contain `/`, not external URLs).
-/// Returns one token set per plausible internal URI found.
+/// Valid examples:   `detail.index`  `application.search.index`  `home.create`
+/// Invalid examples: `1.0.0`  `user.name`  `index.php`  `foo`
+fn looks_like_dot_notation(s: &str) -> bool {
+    if !s.contains('.') || s.contains(' ') || s.contains('/') || s.contains('\\') {
+        return false;
+    }
+    let segments: Vec<&str> = s.split('.').collect();
+    if segments.len() < 2 { return false; }
+    segments.iter().all(|seg| {
+        seg.len() >= 2
+            && seg.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && !seg.chars().all(|c| c.is_ascii_digit())
+    })
+}
+
+/// Extract internal path-reference token sets from file content.
+///
+/// Scans all single- and double-quoted strings and extracts those that look
+/// like internal path references: slash paths, PHP backslash namespaces,
+/// and dot-notation view/route names (e.g. `detail.index`).
+/// Returns one token set per plausible reference found.
 pub fn extract_uri_paths(content: &str) -> Vec<Vec<String>> {
     let mut result = Vec::new();
     let bytes = content.as_bytes();
