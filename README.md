@@ -92,7 +92,31 @@ akin src/controllers/UserController.ts -t 0.5
 
 これにより、`view/search/index.phtml`（ドメイン: "search"）と`view/index/index.phtml`（ドメイン: "index"）が別ドメインと識別され、`IndexController.php`（ドメイン: "index"）が同ドメインとして正しく上位に来ます。
 
-### ノイズトークンの重み調整
+### ファイル参照の解析
+
+#### 引用符スキャン（全言語共通）
+
+ファイル内の引用符（`"..."` `'...'`）をスキャンし、以下のスタイルの内部パス参照を抽出します。
+
+| スタイル | 例 | 対象 |
+|---------|-----|------|
+| スラッシュ | `/application/search` | URL・ファイルパス全般 |
+| バックスラッシュ | `App\Http\Controllers\HomeController` | PHP名前空間・Windowsパス |
+| ドット記法 | `detail.index`, `home.create` | Laravelビュー名・ZF2ルート名など |
+
+外部URL（http/https/mailto等）は自動除外されます。
+
+#### 言語別・非引用符スキャン
+
+ファイル拡張子から言語を検出し、引用符なしのimport/use文を追加解析します。
+
+| 言語 | 対象パターン | ノイズ除去 |
+|------|-------------|----------|
+| Python (`.py`) | `import pkg.mod`、`from pkg.mod import X` | — |
+| Rust (`.rs`) | `use crate::module::Item;`、`mod name;` | `crate`、`std`、`super` 等 |
+| Java/Kotlin (`.java`/`.kt`) | `import com.example.Class;` | `com`、`org`、`java`、`javax` 等 |
+| C# (`.cs`) | `using Company.Product.Class;` | `System`、`Microsoft` 等 |
+| PHP (`.php`/`.phtml`) | `use App\Models\User;` | フレームワーク名（`illuminate` 等） |
 
 `src`・`app`・`lib`・`resources` など、多くのファイルに共通して現れるディレクトリ名はJaccard計算時の重みを0.2に下げ、スコアが引っ張られないようにします。
 
