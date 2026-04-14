@@ -9,7 +9,10 @@ use std::path::PathBuf;
 use scorer::similarity_score;
 
 #[derive(Parser)]
-#[command(name = "akin", about = "Find files related to a target file by path similarity")]
+#[command(
+    name = "akin",
+    about = "Find files related to a target file by path similarity"
+)]
 struct Cli {
     /// Target file path to find related files for
     target: PathBuf,

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::tokenizer::{normalize, tokenize, NOISE_TOKENS};
+use crate::tokenizer::{NOISE_TOKENS, normalize, tokenize};
 
 // ── Language detection ───────────────────────────────────────────────────────
 
@@ -9,7 +9,7 @@ use crate::tokenizer::{normalize, tokenize, NOISE_TOKENS};
 enum Language {
     Python,
     Rust,
-    Java,   // also Kotlin
+    Java, // also Kotlin
     CSharp,
     Php,
     Generic,
@@ -38,7 +38,9 @@ fn looks_like_dot_notation(s: &str) -> bool {
         return false;
     }
     let segments: Vec<&str> = s.split('.').collect();
-    if segments.len() < 2 { return false; }
+    if segments.len() < 2 {
+        return false;
+    }
     segments.iter().all(|seg| {
         seg.len() >= 2
             && seg.chars().all(|c| c.is_alphanumeric() || c == '_')
@@ -56,10 +58,23 @@ fn looks_like_dot_notation(s: &str) -> bool {
 /// External schemes (http/https/mailto/tel/data/javascript/`//`/#) are filtered out.
 fn parse_uri_tokens(s: &str) -> Option<Vec<String>> {
     let s = s.trim();
-    if s.is_empty() { return None; }
+    if s.is_empty() {
+        return None;
+    }
 
-    for prefix in &["http://", "https://", "//", "mailto:", "tel:", "javascript:", "data:", "#"] {
-        if s.starts_with(prefix) { return None; }
+    for prefix in &[
+        "http://",
+        "https://",
+        "//",
+        "mailto:",
+        "tel:",
+        "javascript:",
+        "data:",
+        "#",
+    ] {
+        if s.starts_with(prefix) {
+            return None;
+        }
     }
 
     let tokens: Vec<String> = if s.contains('/') {
@@ -94,7 +109,9 @@ fn parse_uri_tokens(s: &str) -> Option<Vec<String>> {
         return None;
     };
 
-    if tokens.len() < 2 { return None; }
+    if tokens.len() < 2 {
+        return None;
+    }
     Some(tokens)
 }
 
@@ -143,7 +160,9 @@ fn tokenize_module_path(path: &str, extra_noise: &[&str]) -> Vec<String> {
 }
 
 fn push_if_nonempty(result: &mut Vec<Vec<String>>, tokens: Vec<String>) {
-    if !tokens.is_empty() { result.push(tokens); }
+    if !tokens.is_empty() {
+        result.push(tokens);
+    }
 }
 
 /// Python: `import pkg.module` and `from pkg.module import X`
@@ -153,7 +172,9 @@ fn extract_python_refs(content: &str) -> Vec<Vec<String>> {
     let mut result = Vec::new();
     for line in content.lines() {
         let line = line.trim();
-        if line.starts_with('#') { continue; }
+        if line.starts_with('#') {
+            continue;
+        }
 
         let module: Option<&str> = if let Some(rest) = line.strip_prefix("from ") {
             // Strip relative dots: `from ..pkg.mod import X` → `pkg.mod`
@@ -168,7 +189,8 @@ fn extract_python_refs(content: &str) -> Vec<Vec<String>> {
             }
         } else if let Some(rest) = line.strip_prefix("import ") {
             // `import pkg.mod` or `import pkg.mod as alias`
-            rest.split(',').next()
+            rest.split(',')
+                .next()
                 .and_then(|m| m.split(" as ").next())
                 .map(str::trim)
         } else {
@@ -188,25 +210,34 @@ fn extract_python_refs(content: &str) -> Vec<Vec<String>> {
 /// path are pushed so that `use crate::scorer::fn_name` still matches `scorer.rs`.
 fn extract_rust_refs(content: &str) -> Vec<Vec<String>> {
     const RUST_NOISE: &[&str] = &[
-        "crate", "super", "self", "std", "core", "alloc", "proc_macro",
+        "crate",
+        "super",
+        "self",
+        "std",
+        "core",
+        "alloc",
+        "proc_macro",
     ];
     let mut result = Vec::new();
     for line in content.lines() {
         let line = line.trim();
-        if line.starts_with("//") { continue; }
+        if line.starts_with("//") {
+            continue;
+        }
 
         if let Some(rest) = line.strip_prefix("use ") {
             // Strip group import suffix: `use a::b::{X, Y};` → `a::b`
             let path_str = rest
                 .trim_end_matches(';')
-                .split('{').next().unwrap_or(rest)
+                .split('{')
+                .next()
+                .unwrap_or(rest)
                 .trim_end_matches("::")
                 .trim();
 
             // Module path = all-but-last "::" segment
             // e.g. `crate::scorer::similarity_score` → module = `crate::scorer`
-            let segments: Vec<&str> =
-                path_str.split("::").filter(|s| !s.is_empty()).collect();
+            let segments: Vec<&str> = path_str.split("::").filter(|s| !s.is_empty()).collect();
             if segments.len() >= 2 {
                 let module_str = segments[..segments.len() - 1].join("::");
                 push_if_nonempty(&mut result, tokenize_module_path(&module_str, RUST_NOISE));
@@ -216,14 +247,19 @@ fn extract_rust_refs(content: &str) -> Vec<Vec<String>> {
             let full = tokenize_module_path(path_str, RUST_NOISE);
             if !full.is_empty() {
                 let is_dup = result.last().map(|l| l == &full).unwrap_or(false);
-                if !is_dup { result.push(full); }
+                if !is_dup {
+                    result.push(full);
+                }
             }
         } else if let Some(rest) = line.strip_prefix("mod ") {
             let name = rest.trim_end_matches(';').trim();
             if !name.contains('{') {
                 push_if_nonempty(
                     &mut result,
-                    tokenize(name).into_iter().filter(|t| t.len() >= 2).collect(),
+                    tokenize(name)
+                        .into_iter()
+                        .filter(|t| t.len() >= 2)
+                        .collect(),
                 );
             }
         }
@@ -237,14 +273,15 @@ fn extract_rust_refs(content: &str) -> Vec<Vec<String>> {
 /// Requires ≥2 meaningful tokens after filtering to suppress stdlib false-positives.
 fn extract_java_refs(content: &str) -> Vec<Vec<String>> {
     const JAVA_NOISE: &[&str] = &[
-        "com", "org", "net", "io", "gov", "edu",
-        "java", "javax", "android", "kotlin",
-        "sun", "oracle", "apache", "google",
+        "com", "org", "net", "io", "gov", "edu", "java", "javax", "android", "kotlin", "sun",
+        "oracle", "apache", "google",
     ];
     let mut result = Vec::new();
     for line in content.lines() {
         let line = line.trim();
-        if line.starts_with("//") || line.starts_with('*') { continue; }
+        if line.starts_with("//") || line.starts_with('*') {
+            continue;
+        }
 
         if let Some(rest) = line.strip_prefix("import ") {
             let rest = rest.strip_prefix("static ").unwrap_or(rest);
@@ -253,7 +290,9 @@ fn extract_java_refs(content: &str) -> Vec<Vec<String>> {
                 .trim_end_matches(".*") // wildcard: com.example.*
                 .trim();
             let tokens = tokenize_module_path(path, JAVA_NOISE);
-            if tokens.len() >= 2 { result.push(tokens); }
+            if tokens.len() >= 2 {
+                result.push(tokens);
+            }
         }
     }
     result
@@ -268,18 +307,19 @@ fn extract_csharp_refs(content: &str) -> Vec<Vec<String>> {
     let mut result = Vec::new();
     for line in content.lines() {
         let line = line.trim();
-        if line.starts_with("//") || line.starts_with('*') { continue; }
+        if line.starts_with("//") || line.starts_with('*') {
+            continue;
+        }
 
         if let Some(rest) = line.strip_prefix("using ") {
             let rest = rest.strip_prefix("static ").unwrap_or(rest);
             // `using Alias = Namespace.Class;` → take part after `=`
-            let rest = rest
-                .splitn(2, " = ")
-                .nth(1)
-                .unwrap_or(rest);
+            let rest = rest.splitn(2, " = ").nth(1).unwrap_or(rest);
             let path = rest.trim_end_matches(';').trim();
             let tokens = tokenize_module_path(path, CSHARP_NOISE);
-            if tokens.len() >= 2 { result.push(tokens); }
+            if tokens.len() >= 2 {
+                result.push(tokens);
+            }
         }
     }
     result
@@ -292,22 +332,35 @@ fn extract_csharp_refs(content: &str) -> Vec<Vec<String>> {
 /// the language-agnostic quoted-string scanner.
 fn extract_php_use_refs(content: &str) -> Vec<Vec<String>> {
     const PHP_NOISE: &[&str] = &[
-        "illuminate", "laravel", "symfony", "doctrine",
-        "league", "monolog", "guzzle", "psr", "zend",
+        "illuminate",
+        "laravel",
+        "symfony",
+        "doctrine",
+        "league",
+        "monolog",
+        "guzzle",
+        "psr",
+        "zend",
     ];
     let mut result = Vec::new();
     for line in content.lines() {
         let line = line.trim();
-        if line.starts_with("//") || line.starts_with('*') || line.starts_with('#') { continue; }
+        if line.starts_with("//") || line.starts_with('*') || line.starts_with('#') {
+            continue;
+        }
 
         if let Some(rest) = line.strip_prefix("use ") {
             // `use App\Model\User as U;` → strip alias and semicolon
             let path = rest
-                .split(" as ").next().unwrap_or(rest)
+                .split(" as ")
+                .next()
+                .unwrap_or(rest)
                 .trim_end_matches(';')
                 .trim();
             // Closure `use ($var)` starts with `(` — skip
-            if path.starts_with('(') { continue; }
+            if path.starts_with('(') {
+                continue;
+            }
             let tokens: Vec<String> = path
                 .split('\\')
                 .filter(|seg| !seg.is_empty())
@@ -326,11 +379,11 @@ fn extract_php_use_refs(content: &str) -> Vec<Vec<String>> {
 
 fn extract_unquoted_refs(content: &str, lang: &Language) -> Vec<Vec<String>> {
     match lang {
-        Language::Python  => extract_python_refs(content),
-        Language::Rust    => extract_rust_refs(content),
-        Language::Java    => extract_java_refs(content),
-        Language::CSharp  => extract_csharp_refs(content),
-        Language::Php     => extract_php_use_refs(content),
+        Language::Python => extract_python_refs(content),
+        Language::Rust => extract_rust_refs(content),
+        Language::Java => extract_java_refs(content),
+        Language::CSharp => extract_csharp_refs(content),
+        Language::Php => extract_php_use_refs(content),
         Language::Generic => vec![],
     }
 }
@@ -339,7 +392,9 @@ fn extract_unquoted_refs(content: &str, lang: &Language) -> Vec<Vec<String>> {
 
 /// Read file content and return a set of word tokens (length >= 2)
 pub fn content_tokens(path: &Path) -> HashSet<String> {
-    let Ok(bytes) = std::fs::read(path) else { return HashSet::new() };
+    let Ok(bytes) = std::fs::read(path) else {
+        return HashSet::new();
+    };
     let text = String::from_utf8_lossy(&bytes);
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|s| s.len() >= 2)
@@ -351,10 +406,16 @@ pub fn content_tokens(path: &Path) -> HashSet<String> {
 pub fn content_similarity(a: &Path, b: &Path) -> f64 {
     let a_tokens = content_tokens(a);
     let b_tokens = content_tokens(b);
-    if a_tokens.is_empty() && b_tokens.is_empty() { return 0.0; }
+    if a_tokens.is_empty() && b_tokens.is_empty() {
+        return 0.0;
+    }
     let intersection = a_tokens.intersection(&b_tokens).count();
     let union = a_tokens.union(&b_tokens).count();
-    if union == 0 { 0.0 } else { intersection as f64 / union as f64 }
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f64 / union as f64
+    }
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -368,14 +429,18 @@ pub fn content_similarity(a: &Path, b: &Path) -> f64 {
 ///
 /// Overlap ≥ 50% of URI tokens is required to suppress accidental matches.
 pub fn link_bonus(target_full: &Path, candidate_rel: &Path) -> f64 {
-    let Ok(bytes) = std::fs::read(target_full) else { return 0.0 };
+    let Ok(bytes) = std::fs::read(target_full) else {
+        return 0.0;
+    };
     let content = String::from_utf8_lossy(&bytes);
     let lang = detect_language(target_full);
 
     let mut all_refs = extract_quoted_refs(&content);
     all_refs.extend(extract_unquoted_refs(&content, &lang));
 
-    if all_refs.is_empty() { return 0.0; }
+    if all_refs.is_empty() {
+        return 0.0;
+    }
 
     // Candidate path tokens (noise-filtered) for overlap calculation
     let c_tokens: HashSet<String> = normalize(candidate_rel)
@@ -386,10 +451,14 @@ pub fn link_bonus(target_full: &Path, candidate_rel: &Path) -> f64 {
     let mut best = 0.0f64;
     for uri_tokens in &all_refs {
         let total = uri_tokens.len();
-        if total == 0 { continue; }
+        if total == 0 {
+            continue;
+        }
         let overlap = uri_tokens.iter().filter(|t| c_tokens.contains(*t)).count();
         let score = overlap as f64 / total as f64;
-        if score >= 0.5 { best = best.max(score); }
+        if score >= 0.5 {
+            best = best.max(score);
+        }
     }
     best
 }

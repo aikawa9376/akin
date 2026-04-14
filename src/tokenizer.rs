@@ -2,23 +2,65 @@ use std::path::Path;
 
 /// Noise tokens that should be weighted down (common directory names)
 pub const NOISE_TOKENS: &[&str] = &[
-    "app", "src", "lib", "resources", "assets", "main", "index",
-    "mod", "bin", "pkg", "internal", "common", "shared",
+    "app",
+    "src",
+    "lib",
+    "resources",
+    "assets",
+    "main",
+    "index",
+    "mod",
+    "bin",
+    "pkg",
+    "internal",
+    "common",
+    "shared",
 ];
 
 /// Architectural role words — indicate *type* of file, not its domain
 pub const TYPE_WORDS: &[&str] = &[
-    "controller", "model", "view", "service", "repository", "factory",
-    "helper", "manager", "handler", "test", "spec", "dto", "dao",
-    "middleware", "component", "provider", "resolver", "presenter",
-    "interactor", "usecase", "query", "command", "listener", "observer",
+    "controller",
+    "model",
+    "view",
+    "service",
+    "repository",
+    "factory",
+    "helper",
+    "manager",
+    "handler",
+    "test",
+    "spec",
+    "dto",
+    "dao",
+    "middleware",
+    "component",
+    "provider",
+    "resolver",
+    "presenter",
+    "interactor",
+    "usecase",
+    "query",
+    "command",
+    "listener",
+    "observer",
 ];
 
 /// Generic filename stems that carry no domain information on their own.
 /// When a file has one of these names, the parent directory is the real domain.
 pub const GENERIC_STEMS: &[&str] = &[
-    "index", "show", "create", "edit", "delete", "update", "store",
-    "main", "home", "base", "default", "init", "bootstrap",
+    "index",
+    "show",
+    "create",
+    "edit",
+    "delete",
+    "update",
+    "store",
+    "main",
+    "home",
+    "base",
+    "default",
+    "init",
+    "bootstrap",
 ];
 
 /// Split a path string into tokens by separators and word boundaries (camelCase, snake_case)
@@ -74,6 +116,32 @@ pub fn primary_stem(path: &Path) -> String {
         .next()
         .unwrap_or("")
         .to_lowercase()
+}
+
+/// Extract the filename after stripping all extensions.
+/// e.g. "UserController.spec.ts" → "usercontroller"
+pub fn basename_without_extensions(path: &Path) -> String {
+    let mut p = path.to_path_buf();
+    while p.extension().is_some() {
+        p = p.with_extension("");
+    }
+    p.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+}
+
+/// Extract extension-like suffix tokens after the primary stem.
+/// e.g. "UserController.spec.ts" → ["spec", "ts"]
+pub fn extension_tokens(path: &Path) -> Vec<String> {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .split('.')
+        .skip(1)
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.to_lowercase())
+        .collect()
 }
 
 /// Extract the original-case stem (before lowercasing) for proper camelCase splitting.
