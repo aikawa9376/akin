@@ -44,8 +44,13 @@ impl ProjectStats {
         }
 
         let freq = self.basename_freq.get(&basename).copied().unwrap_or(1) as f64;
+        if freq <= 2.0 {
+            return 1.0;
+        }
+
         let total = self.total_files as f64;
-        let idf = (1.0 + total / freq).ln() / (1.0 + total).ln();
+        let adjusted_freq = freq - 1.0;
+        let idf = (1.0 + total / adjusted_freq).ln() / (1.0 + total).ln();
         idf.powf(2.0).clamp(0.0, 1.0)
     }
 }
@@ -119,6 +124,14 @@ pub fn filename_similarity(target: &Path, candidate: &Path) -> f64 {
     (jw + boost).min(1.0)
 }
 
+pub fn exact_basename_match(target: &Path, candidate: &Path) -> f64 {
+    if basename_without_extensions(target) == basename_without_extensions(candidate) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 /// Score based on shared extension-like suffixes such as ".spec.ts" or ".html".
 /// Kept intentionally low so extension matches only act as a weak tie-breaker.
 pub fn extension_similarity(target: &Path, candidate: &Path) -> f64 {
@@ -157,6 +170,15 @@ pub fn dir_proximity(target: &Path, candidate: &Path) -> f64 {
         1.0
     } else {
         common as f64 / max_depth as f64
+    }
+}
+
+/// Exact sibling-directory match.
+pub fn same_directory(target: &Path, candidate: &Path) -> f64 {
+    if target.parent() == candidate.parent() {
+        1.0
+    } else {
+        0.0
     }
 }
 
@@ -234,23 +256,26 @@ pub fn similarity_score(
         1.0 - levenshtein(&t_str, &c_str) as f64 / max_len as f64
     };
 
-    // Weighted base score
-    // domain_sim leads: distinguishes "index action" from "search action" even across directory trees
-    let base = domain_sim * 0.22
-        + stem_sim * 0.26
-        + filename_sim * 0.20
-        + extension_sim * 0.02
-        + jaccard * 0.15
-        + dir_prox * 0.10
+    let target_specificity = stats.filename_specificity(target);
+    let candidate_specificity = stats.filename_specificity(candidate);
+    let domain_signal_scale = 0.25 + target_specificity * 0.75;
+    let name_signal_scale = 0.15 + target_specificity * 0.85;
+    let candidate_name_scale = 0.35 + candidate_specificity * 0.65;
+
+    // When the target filename is generic (style/index/etc. in this project),
+    // path context should dominate over raw filename equality.
+    let context_score = domain_sim * 0.26 * domain_signal_scale
+        + jaccard * 0.18
+        + dir_prox * 0.15
         + jw * 0.03
         + lev_sim * 0.02;
-
-    // Frequent basenames like "style" or "index" are weak identifiers, so
-    // we reduce their overall contribution using project-wide filename frequency.
-    let common_name_factor = stats
-        .filename_specificity(target)
-        .min(stats.filename_specificity(candidate));
-    let base = base * (0.2 + common_name_factor * 0.8);
+    let filename_score = (stem_sim * 0.22 + filename_sim * 0.12 + extension_sim * 0.02)
+        * name_signal_scale
+        * candidate_name_scale;
+    let exact_name_bonus =
+        exact_basename_match(target, candidate) * target_specificity * candidate_specificity * 0.60;
+    let sibling_bonus = same_directory(target, candidate) * (1.0 - target_specificity) * 0.30;
+    let base = context_score + filename_score + exact_name_bonus + sibling_bonus;
 
     // 9. Recency bonus (additive, max +0.1)
     let recency = recency_score(candidate_full) * 0.1;
@@ -272,7 +297,9 @@ pub fn similarity_score(
 mod tests {
     use std::path::Path;
 
-    use super::{ProjectStats, extension_similarity, filename_similarity, similarity_score};
+    use super::{
+        ProjectStats, extension_similarity, filename_similarity, same_directory, similarity_score,
+    };
 
     fn stats(paths: &[&Path]) -> ProjectStats {
         ProjectStats::from_paths(paths.iter().copied())
@@ -323,10 +350,12 @@ mod tests {
     fn repeated_basenames_get_lower_specificity() {
         let style_a = Path::new("src/styles/style.css");
         let style_b = Path::new("src/components/style.css");
+        let style_c = Path::new("src/pages/style.css");
         let index_a = Path::new("src/pages/home/index.tsx");
         let index_b = Path::new("src/pages/search/index.tsx");
+        let index_c = Path::new("src/pages/admin/index.tsx");
         let unique = Path::new("src/controllers/UserController.ts");
-        let stats = stats(&[style_a, style_b, index_a, index_b, unique]);
+        let stats = stats(&[style_a, style_b, style_c, index_a, index_b, index_c, unique]);
 
         assert!(stats.filename_specificity(style_a) < stats.filename_specificity(unique));
         assert!(stats.filename_specificity(index_a) < stats.filename_specificity(unique));
@@ -356,5 +385,26 @@ mod tests {
         let rare_score = similarity_score(target, candidate, target, candidate, &rare_stats);
 
         assert!(common_score < rare_score);
+    }
+
+    #[test]
+    fn generic_target_prefers_siblings_over_same_named_files_elsewhere() {
+        let target = Path::new("src/components/button/style.css");
+        let sibling = Path::new("src/components/button/Button.tsx");
+        let other_style = Path::new("src/components/card/style.css");
+        let stats = stats(&[
+            target,
+            sibling,
+            other_style,
+            Path::new("src/layouts/main/style.css"),
+            Path::new("src/pages/home/style.css"),
+            Path::new("src/components/card/Card.tsx"),
+        ]);
+
+        let sibling_score = similarity_score(target, sibling, target, sibling, &stats);
+        let other_style_score = similarity_score(target, other_style, target, other_style, &stats);
+
+        assert_eq!(same_directory(target, sibling), 1.0);
+        assert!(sibling_score > other_style_score);
     }
 }
