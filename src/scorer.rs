@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -9,6 +9,46 @@ use crate::tokenizer::{
     NOISE_TOKENS, basename_without_extensions, domain_tokens, extension_tokens, normalize,
     primary_stem,
 };
+
+/// Project-wide filename frequency statistics used to downweight generic names.
+pub struct ProjectStats {
+    total_files: usize,
+    basename_freq: HashMap<String, usize>,
+}
+
+impl ProjectStats {
+    pub fn from_paths<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Self {
+        let mut total_files = 0usize;
+        let mut basename_freq = HashMap::new();
+
+        for path in paths {
+            total_files += 1;
+            let basename = basename_without_extensions(path);
+            if !basename.is_empty() {
+                *basename_freq.entry(basename).or_insert(0) += 1;
+            }
+        }
+
+        Self {
+            total_files,
+            basename_freq,
+        }
+    }
+
+    /// IDF-like specificity score in [0, 1].
+    /// Frequently repeated basenames such as "index" or "style" are pushed down.
+    pub fn filename_specificity(&self, path: &Path) -> f64 {
+        let basename = basename_without_extensions(path);
+        if basename.is_empty() || self.total_files <= 1 {
+            return 1.0;
+        }
+
+        let freq = self.basename_freq.get(&basename).copied().unwrap_or(1) as f64;
+        let total = self.total_files as f64;
+        let idf = (1.0 + total / freq).ln() / (1.0 + total).ln();
+        idf.powf(2.0).clamp(0.0, 1.0)
+    }
+}
 
 /// Compute token weight (lower for noise tokens)
 pub fn token_weight(token: &str) -> f64 {
@@ -159,6 +199,7 @@ pub fn similarity_score(
     candidate: &Path,
     target_full: &Path,
     candidate_full: &Path,
+    stats: &ProjectStats,
 ) -> f64 {
     // 1. Semantic domain similarity (index/index.phtml → domain "index"; IndexController → domain "index")
     let domain_sim = domain_similarity(target, candidate);
@@ -204,6 +245,13 @@ pub fn similarity_score(
         + jw * 0.03
         + lev_sim * 0.02;
 
+    // Frequent basenames like "style" or "index" are weak identifiers, so
+    // we reduce their overall contribution using project-wide filename frequency.
+    let common_name_factor = stats
+        .filename_specificity(target)
+        .min(stats.filename_specificity(candidate));
+    let base = base * (0.2 + common_name_factor * 0.8);
+
     // 9. Recency bonus (additive, max +0.1)
     let recency = recency_score(candidate_full) * 0.1;
 
@@ -224,7 +272,11 @@ pub fn similarity_score(
 mod tests {
     use std::path::Path;
 
-    use super::{extension_similarity, filename_similarity, similarity_score};
+    use super::{ProjectStats, extension_similarity, filename_similarity, similarity_score};
+
+    fn stats(paths: &[&Path]) -> ProjectStats {
+        ProjectStats::from_paths(paths.iter().copied())
+    }
 
     #[test]
     fn full_filename_match_ignores_extension_suffixes() {
@@ -247,16 +299,62 @@ mod tests {
         let target = Path::new("src/controllers/UserController.ts");
         let same_name_diff_ext = Path::new("tests/UserController.rs");
         let different_name_same_ext = Path::new("src/controllers/PostController.ts");
+        let stats = stats(&[target, same_name_diff_ext, different_name_same_ext]);
 
-        let same_name_score =
-            similarity_score(target, same_name_diff_ext, target, same_name_diff_ext);
+        let same_name_score = similarity_score(
+            target,
+            same_name_diff_ext,
+            target,
+            same_name_diff_ext,
+            &stats,
+        );
         let different_name_score = similarity_score(
             target,
             different_name_same_ext,
             target,
             different_name_same_ext,
+            &stats,
         );
 
         assert!(same_name_score > different_name_score);
+    }
+
+    #[test]
+    fn repeated_basenames_get_lower_specificity() {
+        let style_a = Path::new("src/styles/style.css");
+        let style_b = Path::new("src/components/style.css");
+        let index_a = Path::new("src/pages/home/index.tsx");
+        let index_b = Path::new("src/pages/search/index.tsx");
+        let unique = Path::new("src/controllers/UserController.ts");
+        let stats = stats(&[style_a, style_b, index_a, index_b, unique]);
+
+        assert!(stats.filename_specificity(style_a) < stats.filename_specificity(unique));
+        assert!(stats.filename_specificity(index_a) < stats.filename_specificity(unique));
+    }
+
+    #[test]
+    fn common_filenames_are_penalized_more_than_rare_ones() {
+        let target = Path::new("src/pages/home/index.tsx");
+        let candidate = Path::new("src/pages/search/index.tsx");
+
+        let common_stats = stats(&[
+            target,
+            candidate,
+            Path::new("src/pages/admin/index.tsx"),
+            Path::new("src/pages/help/index.tsx"),
+            Path::new("src/styles/style.css"),
+        ]);
+        let rare_stats = stats(&[
+            target,
+            candidate,
+            Path::new("src/controllers/UserController.ts"),
+            Path::new("src/models/User.rs"),
+            Path::new("src/views/dashboard.html"),
+        ]);
+
+        let common_score = similarity_score(target, candidate, target, candidate, &common_stats);
+        let rare_score = similarity_score(target, candidate, target, candidate, &rare_stats);
+
+        assert!(common_score < rare_score);
     }
 }

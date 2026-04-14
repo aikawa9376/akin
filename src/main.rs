@@ -6,7 +6,7 @@ use clap::Parser;
 use ignore::WalkBuilder;
 use std::path::PathBuf;
 
-use scorer::similarity_score;
+use scorer::{ProjectStats, similarity_score};
 
 #[derive(Parser)]
 #[command(
@@ -38,14 +38,20 @@ fn main() {
     let target_canonical = target.canonicalize().unwrap_or_else(|_| target.clone());
     let project_root = std::env::current_dir().expect("cannot get current directory");
 
-    let mut results: Vec<(f64, PathBuf)> = WalkBuilder::new(&project_root)
+    let all_files: Vec<PathBuf> = WalkBuilder::new(&project_root)
         .hidden(false)
         .git_ignore(true)
         .build()
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_type().map(|ft| ft.is_file()).unwrap_or(false))
-        .filter_map(|entry| {
-            let path = entry.into_path();
+        .map(|entry| entry.into_path())
+        .collect();
+
+    let stats = ProjectStats::from_paths(all_files.iter().map(|path| path.as_path()));
+
+    let mut results: Vec<(f64, PathBuf)> = all_files
+        .into_iter()
+        .filter_map(|path| {
             let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
 
             if canonical == target_canonical {
@@ -55,7 +61,7 @@ fn main() {
             let rel_target = target.strip_prefix(&project_root).unwrap_or(target);
             let rel_candidate = path.strip_prefix(&project_root).unwrap_or(&path);
 
-            let score = similarity_score(rel_target, rel_candidate, target, &path);
+            let score = similarity_score(rel_target, rel_candidate, target, &path, &stats);
             if score >= cli.threshold {
                 Some((score, path))
             } else {
