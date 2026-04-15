@@ -4,7 +4,8 @@ use std::time::SystemTime;
 
 use strsim::{jaro_winkler, levenshtein};
 
-use crate::content::{content_similarity, link_bonus};
+use crate::content::content_similarity;
+use crate::feature::feature_bonus;
 use crate::tokenizer::{
     NOISE_TOKENS, basename_without_extensions, domain_tokens, extension_tokens, normalize,
     primary_stem,
@@ -287,8 +288,8 @@ pub fn similarity_score(
         0.0
     };
 
-    // 11. Link bonus: explicit internal URI references in target file (max +0.2)
-    let link = link_bonus(target_full, candidate) * 0.2;
+    // 11. Feature bonus: direct references from the target file
+    let link = feature_bonus(target_full, candidate) * 0.3;
 
     base + recency + content_bonus + link
 }

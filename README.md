@@ -82,6 +82,7 @@ akin src/controllers/UserController.ts -t 0.5
 
 - **サブストリングブースト（+0.15）** — ステム類似度計算時、一方のステムが他方に含まれる場合（例: `index` ⊂ `indexcontroller`）
 - **コンテンツ類似度ボーナス（最大+0.1）** — パス類似度が0.9以上の候補に対して、ファイル内容の単語トークンJaccard類似度を追加
+- **言語別 feature ボーナス（最大およそ+0.45）** — `src/feature/` 配下の言語別ルールで明示的な参照を検出し、実際に読んでいるファイルを厚めに加点する
 - **頻出ファイル名ペナルティ** — プロジェクト内で同じベース名が多いほど、`style` や `index` のような識別力の低い名前として自動的に減衰させる
 - **同階層コンテキスト優先** — 起点ファイル名が頻出名なら、別ディレクトリの同名ファイルより同じディレクトリの関連ファイルを優先しやすくする
 
@@ -98,6 +99,8 @@ akin src/controllers/UserController.ts -t 0.5
 
 ### ファイル参照の解析
 
+言語別の参照解析ルールは `src/feature/` 配下に分離してあり、今後は言語ごとの feature をそこへ追加できます。
+
 #### 引用符スキャン（全言語共通）
 
 ファイル内の引用符（`"..."` `'...'`）をスキャンし、以下のスタイルの内部パス参照を抽出します。
@@ -112,15 +115,17 @@ akin src/controllers/UserController.ts -t 0.5
 
 #### 言語別・非引用符スキャン
 
-ファイル拡張子から言語を検出し、引用符なしのimport/use文を追加解析します。
+ファイル拡張子から言語を検出し、引用符なしの import/use 文や言語固有の feature を追加解析します。
 
-| 言語 | 対象パターン | ノイズ除去 |
-|------|-------------|----------|
+| 言語 | 対象パターン | 補足 |
+|------|-------------|------|
 | Python (`.py`) | `import pkg.mod`、`from pkg.mod import X` | — |
-| Rust (`.rs`) | `use crate::module::Item;`、`mod name;` | `crate`、`std`、`super` 等 |
-| Java/Kotlin (`.java`/`.kt`) | `import com.example.Class;` | `com`、`org`、`java`、`javax` 等 |
-| C# (`.cs`) | `using Company.Product.Class;` | `System`、`Microsoft` 等 |
-| PHP (`.php`/`.phtml`) | `use App\Models\User;` | フレームワーク名（`illuminate` 等） |
+| Rust (`.rs`) | `use crate::module::Item;`、`mod name;` | `crate`、`std`、`super` 等のノイズを除去 |
+| Java/Kotlin (`.java`/`.kt`) | `import com.example.Class;` | `com`、`org`、`java`、`javax` 等の接頭辞を除去 |
+| C# (`.cs`) | `using Company.Product.Class;` | `System`、`Microsoft` 等の接頭辞を除去 |
+| PHP / Blade (`.php`/`.phtml`/`.blade.php`) | `use App\Models\User;`、`Foo::class`、`view('users.index')`、`@extends('layouts.app')`、`<x-alert />`、`route('users.show')` | Laravel の controller / blade / component / route 参照を強めに加点 |
+
+特に PHP/Laravel では、controller や blade の中で直接参照している view / component / route / class ファイルに厚めのボーナスが入るため、`Controller -> Blade` や `Blade -> Component` のような辿り方をしやすくしています。
 
 `src`・`app`・`lib`・`resources` など、多くのファイルに共通して現れるディレクトリ名はJaccard計算時の重みを0.2に下げ、スコアが引っ張られないようにします。
 
