@@ -37,6 +37,8 @@ akin <TARGET> [OPTIONS]
 |------------|-----------|------|
 | `-n, --top <N>` | `10` | 表示する結果の件数 |
 | `-t, --threshold <SCORE>` | `0.3` | 表示するスコアの最小値（0.0〜1.0） |
+| `--explain` | `false` | 各候補が上位に来た理由を表示 |
+| `--history-limit <N>` | `400` | git 共変更スコアに使う履歴コミット数 |
 
 ### 例
 
@@ -49,6 +51,9 @@ akin src/controllers/UserController.ts -n 5
 
 # 類似度スコア0.5以上のみ表示
 akin src/controllers/UserController.ts -t 0.5
+
+# なぜその候補が出たかも見る
+akin app/Http/Controllers/UserController.php --explain
 ```
 
 ## 仕組み
@@ -83,6 +88,7 @@ akin src/controllers/UserController.ts -t 0.5
 - **サブストリングブースト（+0.15）** — ステム類似度計算時、一方のステムが他方に含まれる場合（例: `index` ⊂ `indexcontroller`）
 - **コンテンツ類似度ボーナス（最大+0.1）** — パス類似度が0.9以上の候補に対して、ファイル内容の単語トークンJaccard類似度を追加
 - **言語別 feature ボーナス（最大およそ+0.45）** — `src/feature/` 配下の言語別ルールで明示的な参照を検出し、実際に読んでいるファイルを厚めに加点する
+- **git 共変更ボーナス（最大+0.25）** — git 履歴上でターゲットと一緒に変わりやすいファイルを加点し、実際の編集導線に寄せる
 - **頻出ファイル名ペナルティ** — プロジェクト内で同じベース名が多いほど、`style` や `index` のような識別力の低い名前として自動的に減衰させる
 - **同階層コンテキスト優先** — 起点ファイル名が頻出名なら、別ディレクトリの同名ファイルより同じディレクトリの関連ファイルを優先しやすくする
 
@@ -128,6 +134,12 @@ akin src/controllers/UserController.ts -t 0.5
 特に PHP/Laravel では、controller や blade の中で直接参照している view / component / route / class ファイルに厚めのボーナスが入るため、`Controller -> Blade` や `Blade -> Component` のような辿り方をしやすくしています。
 
 `src`・`app`・`lib`・`resources` など、多くのファイルに共通して現れるディレクトリ名はJaccard計算時の重みを0.2に下げ、スコアが引っ張られないようにします。
+
+### 編集候補ランキング
+
+akin は単なるパス類似ではなく、**次に一緒に編集しそうなファイル** を上位に出すことを目指しています。そのために、最新の数百コミットから co-change 関係を抽出し、ターゲットと一緒に変更されやすいファイルを加点します。
+
+`--explain` を付けると、`direct-ref`, `co-change`, `same-dir`, `exact-name` などの短いラベルで、各候補が上位に来た理由を表示します。
 
 ### ファイル収集
 

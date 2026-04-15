@@ -6,10 +6,29 @@ use strsim::{jaro_winkler, levenshtein};
 
 use crate::content::content_similarity;
 use crate::feature::feature_bonus;
+use crate::history::CochangeIndex;
 use crate::tokenizer::{
     NOISE_TOKENS, basename_without_extensions, domain_tokens, extension_tokens, normalize,
     primary_stem,
 };
+
+#[derive(Clone, Debug, Default)]
+pub struct ScoreBreakdown {
+    pub total: f64,
+    pub domain_similarity: f64,
+    pub stem_similarity: f64,
+    pub filename_similarity: f64,
+    pub jaccard_similarity: f64,
+    pub dir_proximity: f64,
+    pub same_directory: bool,
+    pub exact_name_match: bool,
+    pub target_specificity: f64,
+    pub feature_bonus: f64,
+    pub cochange_bonus: f64,
+    pub cochange_commits: usize,
+    pub recency_bonus: f64,
+    pub content_bonus: f64,
+}
 
 /// Project-wide filename frequency statistics used to downweight generic names.
 pub struct ProjectStats {
@@ -217,13 +236,34 @@ pub fn domain_similarity(target: &Path, candidate: &Path) -> f64 {
 /// Arguments:
 /// - `target` / `candidate`: project-relative paths (used for path-based signals)
 /// - `target_full` / `candidate_full`: absolute paths (used for file I/O signals)
+#[allow(dead_code)]
 pub fn similarity_score(
     target: &Path,
     candidate: &Path,
     target_full: &Path,
     candidate_full: &Path,
     stats: &ProjectStats,
+    cochange: &CochangeIndex,
 ) -> f64 {
+    similarity_breakdown(
+        target,
+        candidate,
+        target_full,
+        candidate_full,
+        stats,
+        cochange,
+    )
+    .total
+}
+
+pub fn similarity_breakdown(
+    target: &Path,
+    candidate: &Path,
+    target_full: &Path,
+    candidate_full: &Path,
+    stats: &ProjectStats,
+    cochange: &CochangeIndex,
+) -> ScoreBreakdown {
     // 1. Semantic domain similarity (index/index.phtml → domain "index"; IndexController → domain "index")
     let domain_sim = domain_similarity(target, candidate);
 
@@ -275,7 +315,8 @@ pub fn similarity_score(
         * candidate_name_scale;
     let exact_name_bonus =
         exact_basename_match(target, candidate) * target_specificity * candidate_specificity * 0.60;
-    let sibling_bonus = same_directory(target, candidate) * (1.0 - target_specificity) * 0.30;
+    let same_dir = same_directory(target, candidate);
+    let sibling_bonus = same_dir * (1.0 - target_specificity) * 0.30;
     let base = context_score + filename_score + exact_name_bonus + sibling_bonus;
 
     // 9. Recency bonus (additive, max +0.1)
@@ -289,14 +330,33 @@ pub fn similarity_score(
     };
 
     // 11. Feature bonus: direct references from the target file
-    let link = feature_bonus(target_full, candidate) * 0.3;
+    let direct_ref_bonus = feature_bonus(target_full, candidate) * 0.3;
+    let cochange_evidence = cochange.evidence(target, candidate).unwrap_or_default();
+    let cochange_bonus = cochange_evidence.score * 0.25;
 
-    base + recency + content_bonus + link
+    ScoreBreakdown {
+        total: base + recency + content_bonus + direct_ref_bonus + cochange_bonus,
+        domain_similarity: domain_sim,
+        stem_similarity: stem_sim,
+        filename_similarity: filename_sim,
+        jaccard_similarity: jaccard,
+        dir_proximity: dir_prox,
+        same_directory: same_dir > 0.0,
+        exact_name_match: exact_basename_match(target, candidate) > 0.0,
+        target_specificity,
+        feature_bonus: direct_ref_bonus,
+        cochange_bonus,
+        cochange_commits: cochange_evidence.commit_count,
+        recency_bonus: recency,
+        content_bonus,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
+    use crate::history::CochangeIndex;
 
     use super::{
         ProjectStats, extension_similarity, filename_similarity, same_directory, similarity_score,
@@ -304,6 +364,10 @@ mod tests {
 
     fn stats(paths: &[&Path]) -> ProjectStats {
         ProjectStats::from_paths(paths.iter().copied())
+    }
+
+    fn history() -> CochangeIndex {
+        CochangeIndex::default()
     }
 
     #[test]
@@ -335,6 +399,7 @@ mod tests {
             target,
             same_name_diff_ext,
             &stats,
+            &history(),
         );
         let different_name_score = similarity_score(
             target,
@@ -342,6 +407,7 @@ mod tests {
             target,
             different_name_same_ext,
             &stats,
+            &history(),
         );
 
         assert!(same_name_score > different_name_score);
@@ -382,8 +448,22 @@ mod tests {
             Path::new("src/views/dashboard.html"),
         ]);
 
-        let common_score = similarity_score(target, candidate, target, candidate, &common_stats);
-        let rare_score = similarity_score(target, candidate, target, candidate, &rare_stats);
+        let common_score = similarity_score(
+            target,
+            candidate,
+            target,
+            candidate,
+            &common_stats,
+            &history(),
+        );
+        let rare_score = similarity_score(
+            target,
+            candidate,
+            target,
+            candidate,
+            &rare_stats,
+            &history(),
+        );
 
         assert!(common_score < rare_score);
     }
@@ -402,8 +482,9 @@ mod tests {
             Path::new("src/components/card/Card.tsx"),
         ]);
 
-        let sibling_score = similarity_score(target, sibling, target, sibling, &stats);
-        let other_style_score = similarity_score(target, other_style, target, other_style, &stats);
+        let sibling_score = similarity_score(target, sibling, target, sibling, &stats, &history());
+        let other_style_score =
+            similarity_score(target, other_style, target, other_style, &stats, &history());
 
         assert_eq!(same_directory(target, sibling), 1.0);
         assert!(sibling_score > other_style_score);
