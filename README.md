@@ -129,9 +129,9 @@ akin app/Http/Controllers/UserController.php --explain
 | Rust (`.rs`) | `use crate::module::Item;`、`mod name;` | `crate`、`std`、`super` 等のノイズを除去 |
 | Java/Kotlin (`.java`/`.kt`) | `import com.example.Class;` | `com`、`org`、`java`、`javax` 等の接頭辞を除去 |
 | C# (`.cs`) | `using Company.Product.Class;` | `System`、`Microsoft` 等の接頭辞を除去 |
-| PHP / Blade (`.php`/`.phtml`/`.blade.php`) | `use App\Models\User;`、`Foo::class`、`view('users.index')`、`@extends('layouts.app')`、`<x-alert />`、`route('users.show')` | Laravel の controller / blade / component / route 参照を強めに加点 |
+| PHP / Blade (`.php`/`.phtml`/`.blade.php`) | `use App\Models\User;`、`Foo::class`、`view('users.index')`、`view($view)`、`view($prefix . 'index')`、`@extends('layouts.app')`、`<x-alert />`、`route('users.show')` | Laravel の controller / blade / component / route 参照を強めに加点 |
 
-特に PHP/Laravel では、controller や blade の中で直接参照している view / component / route / class ファイルに厚めのボーナスが入るため、`Controller -> Blade` や `Blade -> Component` のような辿り方をしやすくしています。
+特に PHP/Laravel では、controller や blade の中で直接参照している view / component / route / class ファイルに厚めのボーナスが入るため、`Controller -> Blade` や `Blade -> Component` のような辿り方をしやすくしています。さらに、`$view = 'users.index'; view($view);` や `$prefix = 'users.'; view($prefix . 'index');` のような単純な変数代入・ドット連結も解決します。
 
 `src`・`app`・`lib`・`resources` など、多くのファイルに共通して現れるディレクトリ名はJaccard計算時の重みを0.2に下げ、スコアが引っ張られないようにします。
 

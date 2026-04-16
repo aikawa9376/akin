@@ -153,4 +153,43 @@ mod tests {
         assert!(controller_bonus > model_bonus);
         assert!(controller_bonus > 1.0);
     }
+
+    #[test]
+    fn php_resolves_view_name_from_variable_assignment() {
+        let content = "<?php\n$view = 'users.index';\nreturn view($view);\n";
+        let blade = Path::new("resources/views/users/index.blade.php");
+        let other = Path::new("resources/views/admin/index.blade.php");
+
+        let blade_bonus = reference_bonus_for_content(content, Language::Php, blade);
+        let other_bonus = reference_bonus_for_content(content, Language::Php, other);
+
+        assert!(blade_bonus > other_bonus);
+        assert!(blade_bonus > 1.0);
+    }
+
+    #[test]
+    fn php_resolves_dot_concatenated_view_names() {
+        let content = "<?php\n$prefix = 'users.';\nreturn view($prefix . 'index');\n";
+        let blade = Path::new("resources/views/users/index.blade.php");
+        let other = Path::new("resources/views/admin/index.blade.php");
+
+        let blade_bonus = reference_bonus_for_content(content, Language::Php, blade);
+        let other_bonus = reference_bonus_for_content(content, Language::Php, other);
+
+        assert!(blade_bonus > other_bonus);
+        assert!(blade_bonus > 1.0);
+    }
+
+    #[test]
+    fn php_partial_concat_still_keeps_useful_view_prefix() {
+        let content = "<?php\n$prefix = 'users.';\nreturn view($prefix . $page);\n";
+        let blade = Path::new("resources/views/users/index.blade.php");
+        let other = Path::new("resources/views/admin/index.blade.php");
+
+        let blade_bonus = reference_bonus_for_content(content, Language::Php, blade);
+        let other_bonus = reference_bonus_for_content(content, Language::Php, other);
+
+        assert!(blade_bonus > other_bonus);
+        assert!(blade_bonus > 0.5);
+    }
 }
