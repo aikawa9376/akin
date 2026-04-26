@@ -270,19 +270,19 @@ fn assign_resolved_variable(line: &str, env: &mut HashMap<String, ResolvedValue>
         return;
     }
 
-    let Some(eq_pos) = line.find('=') else {
+    let Some((lhs, rhs_raw)) = line.split_once('=') else {
         return;
     };
-    if matches!(line.as_bytes().get(eq_pos + 1), Some(b'=')) || line[..eq_pos].ends_with('=') {
+    if rhs_raw.starts_with('=') || lhs.ends_with('=') {
         return;
     }
 
-    let name = extract_variable_name(&line[..eq_pos]).map(str::to_string);
+    let name = extract_variable_name(lhs).map(str::to_string);
     let Some(name) = name else {
         return;
     };
 
-    let rhs = line[eq_pos + 1..].trim_end_matches(';').trim();
+    let rhs = rhs_raw.trim_end_matches(';').trim();
     if let Some(resolved) = resolve_php_string_expr(rhs, env) {
         env.insert(name, resolved);
     }
